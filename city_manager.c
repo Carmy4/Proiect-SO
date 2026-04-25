@@ -9,418 +9,448 @@
 
 typedef struct report {
     int ID;
-    char inspector_name[31];
+    char inspector_name[32];
     float latitude, longitude;
-    char category[12];
+    char category[16];
     int severity_level;
     time_t timestamp;
-    char description[101];
+    char description[128];
 } report;
 
-//functie pentru a crea fisierele cerute
-void creaza_fisier_gol(const char* cale, int permisiuni) {
-    //creez fisierul daca nu exista, permisiuniune sa scriu in el
-    //si pun tot ce scriu la sfarsitul lui
-    int fd = open(cale, O_CREAT | O_WRONLY | O_APPEND, permisiuni);
+//variabile globale
+char current_role[32] = "";
+char current_user[32] = "";
 
-    // daca s-a deschis cu succes il inchid, ma intereseaza doar sa il creez
-    if(fd != -1) {
-        close(fd);
-    }
-
-    // ii dau permisiunile cerute
-    chmod(cale, permisiuni);
-}
-
-
-void setup_district(char* district) {
-    char filepath[150];
-
-    // creez folderul districtului
-    mkdir(district, 0750);
-    chmod(district, 0750);
-
-    //creare reports.dat (664)
-    sprintf(filepath, "%s/reports.dat", district);
-    creaza_fisier_gol(filepath, 0664);
-
-    //creare district.cfg (640)
-    sprintf(filepath, "%s/district.cfg", district);
-    creaza_fisier_gol(filepath, 0640);
-
-    // creare logged_district(644)
-    sprintf(filepath, "%s/logged_district", district);
-    creaza_fisier_gol(filepath, 0644);
-}
-void adauga_raport(char* district, char* user_name) {
-    report r;
-    char filepath[150];
-
-    // completez datele care se pun automat
-    r.ID = time(NULL); // folosim timpul curent ca ID unic
-    r.timestamp = time(NULL); // timpul la care s-a facut raportul
-    strcpy(r.inspector_name, user_name); // salvam numele celui care a dat comanda
-
-    // cerem restul datelor de la tastatura
-    printf("X: ");
-    scanf("%f", &r.latitude);
-
-    printf("Y: ");
-    scanf("%f", &r.longitude);
-
-    printf("Category (road/lighting/flooding/other): ");
-    scanf("%11s", r.category);
-
-    printf("Severity level (1/2/3): ");
-    scanf("%d", &r.severity_level);
-
-    // pentru descriere, curatam enter-ul ramas
-    getchar();
-    printf("Description: ");
-    fgets(r.description, 101, stdin); // citim toata propozitia
-    r.description[strcspn(r.description, "\n")] = 0; // taiem enter-ul de la final
-
-    // salvam  in fisierul binar
-    sprintf(filepath, "%s/reports.dat", district);
-
-    // deschidem fisierul doar pentru scriere si adaugare la final
-    int fd = open(filepath, O_WRONLY | O_APPEND);
-    if (fd != -1) {
-        // write ia tot struct-ul si il scrie dintr-o lovitura
-        write(fd, &r, sizeof(report));
-        close(fd);
-        printf("Raportul a fost salvat cu succes in %s!\n", filepath);
-    } else {
-        printf("Eroare: Nu am gasit fisierul reports.dat!\n");
-    }
-}
-// functie cu care transform permisiunile din sistem intr-un text citibil (rw-r--r--)
-void afiseaza_permisiuni(mode_t mode) {
-    // pornesc cu un sir de caractere care reprezinta lipsa totala a permisiunilor
+//functia care traduce permisiunile
+//transform permisiunile din biti in text "rw-rw-r"
+void print_permissions(mode_t mode) {
+    //initial nimeni nu face nimic, totul e blocat
     char p[10] = "---------";
 
-    // parametrul 'mode' vine de la stat(). este un numar care contine toate permisiunile
-    // codate la nivel de biti. ca sa verific daca o permisiune anume exista, folosesc '&' (si logic).
-    // & suprapune bitii din mode cu bitii constantei (ex: S_IRUSR). daca se potrivesc, rezultatul e adevarat.
+    //verific ce are voie sa faca proprietarul (managerul)
+    //folosesc & ca sa verific daca bitul pentru o anumita permisiune (ex read) e activ in varaibila mea mode
+    if (mode & S_IRUSR) p[0] = 'r';
+    if (mode & S_IWUSR) p[1] = 'w';
+    if (mode & S_IXUSR) p[2] = 'x';
 
-    // verific permisiunile pentru owner (managerul proiectului)
-    if (mode & S_IRUSR) p[0] = 'r'; // S_IRUSR = read user
-    if (mode & S_IWUSR) p[1] = 'w'; // S_IWUSR = write user
-    if (mode & S_IXUSR) p[2] = 'x'; // S_IXUSR = execute user
-
-    // verific permisiunile pentru grup (inspectori)
+    //verific ce are voie sa faca grupul (inspectorii)
     if (mode & S_IRGRP) p[3] = 'r';
     if (mode & S_IWGRP) p[4] = 'w';
     if (mode & S_IXGRP) p[5] = 'x';
 
-    // verific permisiunile pentru ceilalti utilizatori (others)
+    //verific ce permisiuni au altii (restul lumii)
     if (mode & S_IROTH) p[6] = 'r';
     if (mode & S_IWOTH) p[7] = 'w';
     if (mode & S_IXOTH) p[8] = 'x';
-
-    // printez rezultatul direct in terminal
     printf("%s", p);
 }
 
-// functia care citeste din fisierul binar si imi afiseaza datele
-void listeaza_rapoarte(char* district) {
-    char filepath[150];
+//functia care noteaza toate actiunile
+// scriu in logged_district tot ce fac. Daca sunt inspector, dau drop direct.
+void log_action(const char* district, const char* action) {
+    if (strcmp(current_role, "inspector") == 0) return; // inspectorii nu scriu in log
 
-    // generez calea spre fisier lipind numele districtului cu restul adresei
-    sprintf(filepath, "%s/reports.dat", district);
+    //construiesc adresa unde se afla log-ul pentru cartierul primit
+    char filepath[256];
+    sprintf(filepath, "%s/logged_district", district);
 
-    // 'struct stat' este un tip de date predefinit in libraria <sys/stat.h> din C.
-    // este o structura special gandita sa stocheze informatii tehnice despre fisiere.
-    // eu imi declar o variabila numita 'info' de acest tip, pe care deocamdata o tin goala.
-    struct stat info;
+    // Deschid fisierul
+    // O_WRONLY = il deschid doar ca sa bag date in el, nu citesc
+    // O_CREAT = daca cineva a sters log-ul din greseala, il creez eu acum la loc
+    // O_APPEND = nu suprascriu, ci ma duc fix la coada fisierului si scriu acolo, ca sa pastrez istoricul
+    //fac fisierul cu permisiune 644 rw-r-r, oricine poate citi, doar managerul poate scrie
+    int fd = open(filepath, O_WRONLY | O_CREAT | O_APPEND, 0644);
 
-    // functia stat() ia adresa fisierului meu si imi umple automat variabila 'info'
-    // cu detaliile de pe hard disk (dimensiune, permisiuni), fara ca eu sa fiu nevoit sa folosesc open() inainte.
-    // functia stat() returneaza valoarea 0 daca a reusit sa citeasca cu succes de pe disc.
-    if (stat(filepath, &info) == 0) {
-        // info.st_size imi scoate dimensiunea in byti direct din structura
-        printf("Detalii fisier: %ld bytes | Permisiuni: ", info.st_size);
-        // info.st_mode contine bitii de permisiuni, asa ca trimit valoarea asta functiei mele de mai sus
-        afiseaza_permisiuni(info.st_mode);
-        printf("\n------------------------------------------------\n");
+    //daca s-a deschis cu succes
+    if (fd != -1) {
+        char buffer[256];
+        // construiesc propozitia pe care o s-o lipesc in fisier
+        // adaug timpul in secunde (time(NULL)),userul si actiunea lui
+        sprintf(buffer, "%ld\n%s\n%s\n", time(NULL), current_user, action);
+        write(fd, buffer, strlen(buffer));
+        close(fd);
+        chmod(filepath, 0644); // fortez permisiunea ceruta
     }
-
-    // deschid fisierul in mod O_RDONLY (read only) pentru ca vreau doar sa il parcurg, nu sa scriu in el
-    int fd = open(filepath, O_RDONLY);
-    if (fd == -1) {
-        printf("Eroare: Nu am putut deschide fisierul.\n");
-        return;
-    }
-
-    // declar o variabila in care o sa extrag datele la fiecare iteratie a buclei
-    report r;
-
-    // read(file_descriptor, unde_salvez, cat_citesc)
-    // functia read decupeaza din fisier o bucata fixa de byti (sizeof(report) o forteaza sa citeasca fix cat tine structura mea)
-    // dupa ce citeste, incarca datele in variabila 'r'. cand nu mai gaseste date in fisier, read() returneaza 0 si bucla se opreste.
-    while (read(fd, &r, sizeof(report)) > 0) {
-        printf("ID: %d | Inspector: %s | Categoria: %s | Gravitate: %d\n",
-               r.ID, r.inspector_name, r.category, r.severity_level);
-    }
-
-    // eliberez fisierul din memorie
-    close(fd);
 }
 
-// functia care scoate un raport din fisierul binar
-void sterge_raport(char* district, int id_de_sters, char* rol) {
-    // doar rolul de manager are permisiunea sa foloseasca functia
-    if (strcmp(rol, "manager") != 0) {
-        printf("Eroare: Doar managerul are voie sa stearga rapoarte!\n");
-        return;
+// functie pentru a pregati folderul si fisierele necesare pentru un cartier
+void setup_district(const char* district) {
+    //stat aduce metadatele fisierului(marime, existenta, permisiuni)
+    struct stat st;
+    char filepath[256];
+
+    // 1. folderul cartierului (req: 750)
+    // stat returneaza -1 daca folderul nu exista pe disc
+    if (stat(district, &st) == -1) {
+        mkdir(district, 0750); // creez folderul
+        chmod(district, 0750); // pun permisiunea ceruta
     }
 
-    char filepath[150];
+    // 2. fisierul binar cu rapoarte (664)
+    sprintf(filepath, "%s/reports.dat", district);
+    // o_creat = il face daca lipseste. o_rdwr = read/write. o_append = adauga la coada
+    int fd = open(filepath, O_CREAT | O_RDWR | O_APPEND, 0664);
+    if (fd != -1) close(fd); // il inchid instant, voiam doar sa ma asigur ca exista
+    chmod(filepath, 0664);
+
+    // 3. fisierul de configurare (640)
+    sprintf(filepath, "%s/district.cfg", district);
+    if (stat(filepath, &st) == -1) {
+        fd = open(filepath, O_CREAT | O_WRONLY, 0640);
+        if (fd != -1) {
+            // daca abia l-am creat, ii scriu o valoare de pornire (pragul 2)
+            write(fd, "severity_threshold=2\n", 21);
+            close(fd);
+        }
+    }
+    chmod(filepath, 0640);
+
+    // 4. jurnalul (644)
+    sprintf(filepath, "%s/logged_district", district);
+    fd = open(filepath, O_CREAT | O_WRONLY | O_APPEND, 0644);
+    if (fd != -1) close(fd);
+    chmod(filepath, 0644);
+
+    // 5. scurtatura (symlink)
+    char symlink_name[256];
+    sprintf(symlink_name, "active_reports-%s", district);
+
+    // lstat se uita fix la scurtatura, nu la fisierul original
+    // daca returneaza 0, inseamna ca exista deja o scurtatura (poate una stricata/veche).
+    if (lstat(symlink_name, &st) == 0) {
+        unlink(symlink_name); // o stergem
+    }
+    // facem scurtatura proaspata care arata spre fisierul reports.dat
+    symlink(filepath, symlink_name);
+}
+
+// functiile de filtrare generate de ai
+
+// sparge textul (ex: "severity:>=:2") in 3 variabile: field, op, value
+int parse_condition(const char *input, char *field, char *op, char *value) {
+    //%[^:] citeste tot textul pana da de caracterul :
+    if (sscanf(input, "%[^:]:%[^:]:%s", field, op, value) == 3) return 1;
+    return 0; // a esuat formatul
+}
+
+// verifica daca un raport corespunde conditiei de mai sus
+int match_condition(report *r, const char *field, const char *op, const char *value) {
+    // daca verificam severitatea
+    if (strcmp(field, "severity") == 0) {
+        int val = atoi(value);
+
+        // facem comparatia in functie de operator
+        if (strcmp(op, "==") == 0) return r->severity_level == val;
+        if (strcmp(op, ">=") == 0) return r->severity_level >= val;
+        if (strcmp(op, "<=") == 0) return r->severity_level <= val;
+    }
+    // daca verificam categoria
+    else if (strcmp(field, "category") == 0) {
+        // compar texte cu strcmp. daca strcmp da 0, inseamna ca sunt identice
+        if (strcmp(op, "==") == 0) return strcmp(r->category, value) == 0;
+    }
+
+    return 0; // daca nu s-a potrivit nimic, raportul asta e respins de filtru
+}
+
+// functia prin care adaug un raport nou in fisierul binar.
+void cmd_add(const char* district) {
+    // mai intai ma asigur ca folderul si fisierele exista, apeland functia de setup.
+    setup_district(district);
+
+    char filepath[256];
     sprintf(filepath, "%s/reports.dat", district);
 
-    // de data asta deschid cu O_RDWR (read and write) pentru ca am nevoie sa citesc rapoartele ca sa caut id-ul,
-    // dar si sa scriu peste ele cand le mut locatia in fisier
-    int fd = open(filepath, O_RDWR);
-    if (fd == -1) {
-        printf("Eroare: Nu pot deschide fisierul pentru stergere.\n");
+    // deschid fisierul in mod scriere (O_WRONLY) si setez O_APPEND ca sa adaug
+    // datele noi fix la sfarsitul fisierului, fara sa suprascriu datele anterioare.
+    int fd = open(filepath, O_WRONLY | O_APPEND);
+    if (fd == -1) return;
+
+    report r;
+
+    // pentru a genera un ID unic si secvential (1, 2, 3...), aflu marimea totala a fisierului in byti folosind stat().
+    //impart aceasta marime la dimensiunea fixa a unei structuri 'report'
+    //rezultatul imi da numarul de rapoarte deja existente in fisier
+    //adun 1 si obtin ID-ul pentru noul meu raport.
+    struct stat st;
+    stat(filepath, &st);
+    r.ID = (st.st_size / sizeof(report)) + 1;
+
+    // preiau timpul curent de la sistem si numele din argumentele liniei de comanda.
+    r.timestamp = time(NULL);
+    strcpy(r.inspector_name, current_user);
+
+    // citesc datele de la tastatura si le stochez direct in membrii structurii.
+    printf("X (latitude): "); scanf("%f", &r.latitude);
+    printf("Y (longitude): "); scanf("%f", &r.longitude);
+    printf("Category (road/lighting/flooding/other): "); scanf("%15s", r.category);
+    printf("Severity level (1/2/3): "); scanf("%d", &r.severity_level);
+
+    //elimin \n
+    getchar();
+    printf("Description: ");
+    fgets(r.description, 128, stdin);
+
+    // elimin caracterul '\n' introdus de fgets la finalul sirului.
+    r.description[strcspn(r.description, "\n")] = 0;
+
+    // scriu toata structura in fisierul binar folosind un singur apel write().
+    write(fd, &r, sizeof(report));
+    close(fd);
+
+    // formatez string-ul de actiune si il trimit catre functia de logging.
+    char actiune[64];
+    sprintf(actiune, "%s add", current_role);
+    log_action(district, actiune);
+}
+
+// functia prin care afisez sub forma de lista scurta toate rapoartele.
+void cmd_list(const char* district) {
+    char filepath[256];
+    sprintf(filepath, "%s/reports.dat", district);
+
+    struct stat st;
+    // daca stat() returneaza -1, inseamna ca fisierul nu a putut fi accesat.
+    if (stat(filepath, &st) == -1) {
+        printf("Nu exista date pt districtul %s\n", district);
         return;
     }
 
+    // afisez permisiunile formatate si
+    // metadatele fisierului (marime si data ultimei modificari).
+    print_permissions(st.st_mode);
+    printf(" | Size: %ld bytes | Last mod: %s", st.st_size, ctime(&st.st_mtime));
+
+    // deschid fisierul in mod exclusiv de citire.
+    int fd = open(filepath, O_RDONLY);
+    if (fd == -1) return;
+
     report r;
+
+    while (read(fd, &r, sizeof(report)) > 0) {
+        printf("[%d]  %s | Cat: %s | Sev: %d\n", r.ID, r.inspector_name, r.category, r.severity_level);
+    }
+    close(fd);
+    log_action(district, "list");
+}
+
+// functia prin care afisez toate detaliile unui singur raport.
+void cmd_view(const char* district, int id_cautat) {
+    char filepath[256];
+    sprintf(filepath, "%s/reports.dat", district);
+
+    int fd = open(filepath, O_RDONLY);
+    if (fd == -1) return;
+
+    report r;
+    int gasit = 0; // folosesc un flag pentru a verifica daca raportul exista.
+
+    // parcurg fisierul secvential.
+    while (read(fd, &r, sizeof(report)) > 0) {
+        // verific daca ID-ul raportului curent corespunde cu parametrul cerut.
+        if (r.ID == id_cautat) {
+            // afisez campurile
+            //folosesc ctime() pentru a converti formatul timestamp (secunde) intr-o data calendaristica.
+            printf("\n=== Raport %d ===\n", r.ID);
+            printf("Inspector: %s\n", r.inspector_name);
+            printf("GPS: %.4f, %.4f\n", r.latitude, r.longitude);
+            printf("Categorie: %s | Severitate: %d\n", r.category, r.severity_level);
+            printf("Data: %s", ctime(&r.timestamp));
+            printf("Descriere: %s\n=================\n\n", r.description);
+
+            gasit = 1;
+            break;
+        }
+    }
+
+    if(!gasit) {
+        printf("Raportul %d nu a fost gasit.\n", id_cautat);
+    }
+
+    close(fd);
+    log_action(district, "view");
+}
+
+// functia prin care sterg fizic un raport din fisierul binar.
+// operatiunea este permisa exclusiv rolului de manager.
+void cmd_remove_report(const char* district, int id_de_sters) {
+    // verificarea restrictiei de securitate
+    if (strcmp(current_role, "manager") != 0) {
+        printf("Eroare: Doar managerii pot sterge rapoarte.\n");
+        return;
+    }
+
+    char filepath[256];
+    sprintf(filepath, "%s/reports.dat", district);
+
+    // deschid in modul o_rdwr (read/write) deoarece trebuie sa citesc fisierul
+    // pentru a localiza raportul, apoi sa suprascriu datele in interiorul lui.
+    int fd = open(filepath, O_RDWR);
+    if (fd == -1) return;
+
+    report r;
+    // variabila in care voi stoca adresa (offset-ul) unde incepe raportul gasit
+    off_t pozitie_stearsa = 0;
     int gasit = 0;
 
-    // off_t este un tip special de variabila in C folosit pentru a retine locatii (offset-uri) din interiorul fisierelor
-    off_t pozitie_stearsa = 0;
-
-    // parcurg fisierul secvential
+    // 1. faza de cautare: parcurg fisierul secvential
     while (read(fd, &r, sizeof(report)) > 0) {
         if (r.ID == id_de_sters) {
             gasit = 1;
-            // am gasit id-ul. in acest moment, cursorul meu intern este fixat DUPA raportul pe care tocmai l-am citit.
-            // folosesc lseek pentru a misca acest cursor.
-            // ii zic sa se duca inapoi (cu valoare negativa) cu fix o structura de raport, pornind de la locatia curenta (SEEK_CUR).
-            // asa ajung sa salvez in variabila 'pozitie_stearsa' adresa exacta unde INCEPE raportul meu.
+            // am gasit id-ul. in acest moment cursorul se afla dupa raportul citit
+            // folosesc lseek cu o valoare negativa pentru a muta cursorul inapoi la inceputul raportului
+            //salvez aceasta pozitie absoluta in variabila.
             pozitie_stearsa = lseek(fd, -sizeof(report), SEEK_CUR);
             break;
         }
     }
 
-    if (gasit == 0) {
-        printf("Nu am gasit niciun raport cu ID-ul %d\n", id_de_sters);
+    if (!gasit) {
+        printf("Nu am gasit raportul.\n");
         close(fd);
         return;
     }
 
-    report raport_urmator;
-
-    // repozitionez cursorul. plec de la inceputul fisierului (SEEK_SET) si ma duc pana la locatia raportului gasit,
-    // apoi mai sar inca un raport ca sa ajung fix la datele pe care vreau sa incep sa le mut spre stanga.
+    report urmatorul;
+    // 2. faza de mutare (shift left): setez cursorul la inceputul raportului imediat
+    // urmator fata de cel pe care vreau sa il sterg.
     lseek(fd, pozitie_stearsa + sizeof(report), SEEK_SET);
 
-    // incep sa citesc tot ce a mai ramas in fisier dupa id-ul sters
-    while (read(fd, &raport_urmator, sizeof(report)) > 0) {
-
-        // mut cursorul inapoi la pozitia pe care vreau sa o suprascriu (sa o sterg)
+    // citesc pe rand restul rapoartelor din dreapta
+    while (read(fd, &urmatorul, sizeof(report)) > 0) {
+        // ma intorc cu cursorul la pozitia unde era raportul anterior
         lseek(fd, pozitie_stearsa, SEEK_SET);
-
-        // scriu datele de la raportul din dreapta peste locatia din stanga
-        write(fd, &raport_urmator, sizeof(report));
-
-        // actualizez pozitia, adunand o dimensiune de raport, ca sa stiu unde suprascriu pe tura urmatoare
+        // suprascriu cu datele raportului din dreapta
+        write(fd, &urmatorul, sizeof(report));
+        // adaug marimea unui raport la variabila de adresa pentru a avansa
         pozitie_stearsa += sizeof(report);
-
-        // sar peste zona in care tocmai am scris, altfel bucla while o sa citeasca acelasi lucru la nesfarsit
+        // sar peste raportul tocmai scris pentru a-l citi pe urmatorul in bucla
         lseek(fd, pozitie_stearsa + sizeof(report), SEEK_SET);
     }
 
-    // dupa ce am copiat totul cu un pas spre stanga, la sfarsitul fisierului a ramas raportul original netaiat (o dublura).
-    // ftruncate ia fisierul si il taie scurt fix la locatia la care s-a oprit algoritmul meu de mai sus, eliminand restul.
+    // 3. faza de trunchiere
+    //dupa mutarea datelor la stanga ultimul raport din fisier a ramas duplicat la coada
+    //apelez ftruncate() pentru a taia dimensiunea fisierului exact la pozitia unde s-a terminat mutarea datelor.
     ftruncate(fd, pozitie_stearsa);
 
     close(fd);
-    printf("Am sters raportul cu ID-ul %d!\n", id_de_sters);
-}
-// functia creeaza o scurtatura (symlink) directa catre fisierul cu rapoarte al unui district
-void creeaza_scurtatura_district(char* district) {
-    char cale_originala[150];
-    char nume_scurtatura[150];
-
-    // generez calea catre fisierul binar real (ex: "centru/reports.dat")
-    sprintf(cale_originala, "%s/reports.dat", district);
-
-    // generez cum vreau sa apara scurtatura mea in folderul curent (ex: "rapoarte_centru.dat")
-    sprintf(nume_scurtatura, "rapoarte_%s.dat", district);
-
-    // functia symlink() din sistemul de operare face legatura simbolica.
-    // primeste ca argumente unde duce scurtatura si cum se numeste ea.
-    // returneaza 0 daca s-a creat cu succes pe disk.
-    if (symlink(cale_originala, nume_scurtatura) == 0) {
-        printf("Am creat scurtatura '%s' pentru districtul '%s'!\n", nume_scurtatura, district);
-    } else {
-        printf("Eroare: Nu am putut crea scurtatura. Poate exista deja?\n");
-    }
+    printf("Sters cu succes!\n");
+    log_action(district, "manager remove_report");
 }
 
-// functia prin care managerul schimba pragul de severitate in fisierul de configurare
-void actualizeaza_prag(char* district, int valoare_noua, char* rol) {
-    // verific restrictia de rol impusa de cerinta
-    if (strcmp(rol, "manager") != 0) {
-        printf("Eroare: Doar managerul poate actualiza pragul!\n");
+// functia prin care managerul actualizeaza valoarea din fisierul district.cfg
+void cmd_update_threshold(const char* district, int prag_nou) {
+    if (strcmp(current_role, "manager") != 0) {
+        printf("Refuz: Doar managerul face asta!\n");
         return;
     }
 
-    char filepath[150];
+    char filepath[256];
     sprintf(filepath, "%s/district.cfg", district);
 
     struct stat st;
-    // folosesc stat() pentru a verifica permisiunile curente ale fisierului inainte sa scriu in el.
-    // cerinta imi cere sa refuz modificarea daca permisiunile nu sunt exact 640.
+    // verificarea permisiunilor fisierului inainte de scriere
     if (stat(filepath, &st) == 0) {
-        // st.st_mode contine mai multi biti (inclusiv tipul fisierului).
-        // aplicand masca & 0777, pastrez strict ultimii 9 biti care reprezinta efectiv permisiunile (rwx).
-        // compar rezultatul cu 0640 (0 in fata inseamna ca e un numar octal - in baza 8, asa cum cere Linux)
+        // aplic masca '& 0777' pe st.st_mode pentru a izola strict ultimii 9 biti
+        // care definesc permisiunile (rwx) si ii compar cu constanta octala 0640.
         if ((st.st_mode & 0777) != 0640) {
-            printf("Eroare securitate: Permisiunile fisierului nu sunt 640! Refuz modificarea.\n");
+            printf("Permisiunile nu sunt 640! Refuz operatiunea.\n");
             return;
         }
-    } else {
-        printf("Eroare: Nu gasesc fisierul district.cfg\n");
+    }
+
+    // deschid fisierul folosind o_wrongly si o_trunc.
+    //flag-ul o_trunc trunchiaza instantaneu fisierul existent la 0 byti, permitandu-mi
+    // sa scriu o valoare complet noua fara a lasa resturi din sirul anterior.
+    int fd = open(filepath, O_WRONLY | O_TRUNC);
+    if (fd != -1) {
+        char buffer[64];
+        sprintf(buffer, "severity_threshold=%d\n", prag_nou);
+        write(fd, buffer, strlen(buffer));
+        close(fd);
+        printf("Prag actualizat.\n");
+    }
+    log_action(district, "manager update_threshold");
+}
+
+// functia de listare filtrata, ce integreaza codul generat de ai
+void cmd_filter(const char* district, const char* condition) {
+    char field[32], op[4], value[32];
+
+    // pasez sirul introdus in linia de comanda (ex: "severity:>=:2") functiei parse.
+    // daca returneaza 0, formatarea argumentelor este gresita.
+    if (!parse_condition(condition, field, op, value)) {
+        printf("Format conditie gresit.\n");
         return;
     }
 
-    // deschid fisierul in mod scriere (O_WRONLY).
-    // folosesc flag-ul O_TRUNC pentru a sterge absolut tot ce era inainte in fisier (il trunchiez la 0 byti),
-    // deoarece vreau sa ramana in el doar noul text cu pragul proaspat actualizat.
-    int fd = open(filepath, O_WRONLY | O_TRUNC);
-    if (fd != -1) {
-        char text_de_scris[50];
-        // construiesc textul exact asa cum il cere formatul: "severity_threshold=VALOARE"
-        sprintf(text_de_scris, "severity_threshold=%d\n", valoare_noua);
+    char filepath[256];
+    sprintf(filepath, "%s/reports.dat", district);
 
-        // scriu string-ul generat direct in fisier
-        write(fd, text_de_scris, strlen(text_de_scris));
+    int fd = open(filepath, O_RDONLY);
+    if (fd == -1) return;
 
-        close(fd);
-        printf("Pragul a fost actualizat la %d in %s!\n", valoare_noua, filepath);
-    } else {
-        printf("Eroare la deschiderea fisierului de configurare.\n");
+    report r;
+    // execut o citire secventiala standard a fisierului binar
+    while (read(fd, &r, sizeof(report)) > 0) {
+        // validez fiecare structura 'r' extrasa prin functia de matching ai.
+        // daca match_condition returneaza 1, printez continutul.
+        if (match_condition(&r, field, op, value)) {
+            printf("Gasit -> ID: %d | Cat: %s | Sev: %d\n", r.ID, r.category, r.severity_level);
+        }
     }
-}
-// functia care functioneaza ca o camera de supraveghere si noteaza tot in fisierul de log
-void scrie_in_jurnal(char* district, char* rol, char* utilizator, char* actiune) {
-    char filepath[150];
-    sprintf(filepath, "%s/logged_district", district);
-
-    // deschid fisierul in mod adaugare la final (O_APPEND).
-    // nu vreau sa sterg istoricul vechi (O_TRUNC), vreau sa adun liniile una sub alta.
-    int fd = open(filepath, O_WRONLY | O_APPEND);
-    if (fd == -1) {
-        return; // daca nu am gasit fisierul, pur si simplu ies (nu dau eroare ca sa nu blochez programul principal)
-    }
-
-    // preiau timpul curent de la sistem
-    time_t acum = time(NULL);
-    char* timp_text = ctime(&acum); // ctime transforma secundele in text citibil (ex: Wed Apr 22 10:15:00 2026)
-
-    // mica smecherie: ctime pune un "\n" (enter) automat la final. il sterg ca sa imi iasa o linie frumoasa in fisier.
-    timp_text[strcspn(timp_text, "\n")] = 0;
-
-    char linie_jurnal[300];
-    // construiesc exact propozitia pe care o voi nota in fisier
-    sprintf(linie_jurnal, "[%s] Rol: %s | User: %s | Actiune: %s\n", timp_text, rol, utilizator, actiune);
-
-    // scriu propozitia generata in fisier
-    write(fd, linie_jurnal, strlen(linie_jurnal));
-
-    close(fd); // inchid fisierul
+    close(fd);
+    log_action(district, "filter");
 }
 
 int main(int argc, char *argv[]) {
-    // variabile in care salvez argumentele citite din comanda
-    char role[20] = "";
-    char user[31] = "";
-    char district[50] = "";
+   //verificare argumente
+    if (argc < 4) {
+        printf("Eroare argumente.\n");
+        return 1;
+    }
 
-    // iterez prin toate argumentele din terminal
     for (int i = 1; i < argc; i++) {
 
-        // detectez rolul si il salvez (ex: manager)
+        // detectez parametrul role si extrag valoarea lui in variabila globala
         if (strcmp(argv[i], "--role") == 0 && i + 1 < argc) {
-            strcpy(role, argv[i+1]);
+            strcpy(current_role, argv[i+1]);
+            // incrementez indexul pentru a sari peste valoarea pe care tocmai am citit-o
             i++;
         }
-
-        // detectez numele utilizatorului si il salvez
         else if (strcmp(argv[i], "--user") == 0 && i + 1 < argc) {
-            strcpy(user, argv[i+1]);
+            strcpy(current_user, argv[i+1]);
             i++;
         }
 
-        // procesez comanda de adaugare raport
+        // detectez comenzile
         else if (strcmp(argv[i], "--add") == 0 && i + 1 < argc) {
-            strcpy(district, argv[i+1]); // salvez cartierul
-
-            setup_district(district); // creez fisierele initiale daca nu exista
-            adauga_raport(district, user); // lansez functia care cere datele de la tastatura
-
-            // chem "camera de supraveghere" ca sa noteze ca am dat add
-            scrie_in_jurnal(district, role, user, "--add");
-            i++; // sar peste numele cartierului din argumente
+            cmd_add(argv[i+1]);
+            i++;
         }
-
-        // procesez comanda de listare
         else if (strcmp(argv[i], "--list") == 0 && i + 1 < argc) {
-            strcpy(district, argv[i+1]); // salvez cartierul
-
-            listeaza_rapoarte(district); // afisez ce este in reports.dat
-
-            // notez in jurnal ca s-a facut o listare
-            scrie_in_jurnal(district, role, user, "--list");
+            cmd_list(argv[i+1]);
             i++;
         }
 
-        // procesez comanda de stergere a unui raport
+        // pentru comenzile complexe ce necesita 2 parametri (cartier si id/valoare),
+        // apelez atoi() pe ultimul argument pentru conversie in integer,
+        // apoi folosesc i += 2 pentru a face un jump de 2 locatii in vectorul argv.
+        else if (strcmp(argv[i], "--view") == 0 && i + 2 < argc) {
+            cmd_view(argv[i+1], atoi(argv[i+2]));
+            i += 2;
+        }
         else if (strcmp(argv[i], "--remove_report") == 0 && i + 2 < argc) {
-            strcpy(district, argv[i+1]); // salvez cartierul
-
-            int id_tinta = atoi(argv[i+2]); // transform ID-ul dat in terminal din string in int
-            sterge_raport(district, id_tinta, role); // dau mai departe id-ul si rolul curent
-
-            // notez in jurnal stergerea
-            scrie_in_jurnal(district, role, user, "--remove_report");
-            i += 2; // sar peste cele 2 argumente procesate (cartier si id)
+            cmd_remove_report(argv[i+1], atoi(argv[i+2]));
+            i += 2;
         }
-
-        // procesez comanda de actualizare a fisierului de configurare
         else if (strcmp(argv[i], "--update_threshold") == 0 && i + 2 < argc) {
-            strcpy(district, argv[i+1]); // salvez cartierul
-
-            int prag_nou = atoi(argv[i+2]); // transform valoarea din string in int
-            actualizeaza_prag(district, prag_nou, role); // lansez functia
-
-            // chem "camera de supraveghere" ca sa noteze ca am dat update
-            scrie_in_jurnal(district, role, user, "--update_threshold");
-            i += 2; // sar peste cele 2 argumente procesate
+            cmd_update_threshold(argv[i+1], atoi(argv[i+2]));
+            i += 2;
         }
-
-        // procesez comanda de creare a scurtaturilor (symlink)
-        else if (strcmp(argv[i], "--manager_view") == 0) {
-            // verific daca utilizatorul are rolul necesar
-            if (strcmp(role, "manager") != 0) {
-                printf("Eroare: Doar managerul poate genera o vedere de ansamblu!\n");
-            } else {
-                // comanda asta se da la final, dupa ce am citit deja un cartier (ex: --list centru --manager_view)
-                // strlen(district) > 0 verifica practic daca variabila mea a salvat un nume de district pe iteratiile trecute
-                if (strlen(district) > 0) {
-                    creeaza_scurtatura_district(district);
-
-                    // notez in jurnal crearea scurtaturilor
-                    scrie_in_jurnal(district, role, user, "--manager_view");
-                } else {
-                    printf("Eroare: Trebuie sa specifici un district inainte de comanda asta.\n");
-                }
-            }
-            // aici nu am i++ pentru ca --manager_view e doar un cuvant simplu (flag), nu e urmat de nicio valoare
+        else if (strcmp(argv[i], "--filter") == 0 && i + 2 < argc) {
+            cmd_filter(argv[i+1], argv[i+2]);
+            i += 2;
         }
     }
 
