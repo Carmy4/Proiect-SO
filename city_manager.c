@@ -6,6 +6,7 @@
 #include <sys/types.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/wait.h>
 
 typedef struct report {
     int ID;
@@ -136,6 +137,41 @@ void setup_district(const char *district) {
     }
 }
 
+//functia de stergere district
+void remove_district( const char *district){
+
+    char symlink_name[256];
+    snprintf(symlink_name,   sizeof(symlink_name),   "active_reports-%s", district);
+
+    if (strcmp(current_role, "manager")!=0) {
+        printf("Doar managerul poate sterge un district!\n");
+        return;
+    }
+
+    pid_t s=fork();
+    if (s==0) {
+        //procesul copil
+        execlp("rm","rm","-rf",district, NULL);
+    }
+    else {
+        //proces parinte
+        waitpid(s, NULL, 0);
+        if (unlink(symlink_name)==-1){
+            printf ("Nu s-a putut sterge symlink!\n");
+            return;
+        }
+        else    
+        if (unlink(symlink_name)==0){
+            printf ("Symlink sters cu succes!\n");
+            return;
+        }
+    }
+
+    //scriem in log
+    log_action(district, "remove_district");
+    printf("Stergere district efectuata cu succes!\n");
+
+}
 // separam campul, operatorul si valoarea din formatul string transmis ca filtru
 int parse_condition(const char *input, char *field, char *op, char *value) {
     if (sscanf(input, "%31[^:]:%3[^:]:%31s", field, op, value) == 3) return 1;
@@ -357,6 +393,7 @@ void cmd_remove_report(const char *district, int id_de_sters) {
         poz_citire  += sizeof(report);
     }
 
+
     // trunchiem fisierul pt a scoate dublura din capat rezultata in urma mutarii
     ftruncate(fd, poz_scriere);
 
@@ -508,6 +545,10 @@ int main(int argc, char *argv[]) {
             }
 
             cmd_filter(district, nr_conditii, conditii);
+        }
+        else if (strcmp(argv[i], "--remove_district") == 0 && i + 1 < argc) {
+            char *district= argv[++i];
+            remove_district(district);
         }
     }
 
