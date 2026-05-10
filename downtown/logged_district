@@ -1,0 +1,7 @@
+1778441126 alice manager add
+1778441126 alice manager notify_monitor_ok: SIGUSR1 sent to PID 23000 for report #1778417959
+1778441233 bob inspector add
+1778441233 bob inspector notify_monitor_ok: SIGUSR1 sent to PID 23000 for report #1778419387
+1778441284 bob inspector add
+1778441284 bob inspector notify_monitor_ok: SIGUSR1 sent to PID 23000 for report #1778433238
+1778441467 alice manager list

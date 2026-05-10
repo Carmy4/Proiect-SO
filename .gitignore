@@ -3,3 +3,4 @@ centru/
 nord/
 active_reports-*
 *.o
+*.tar.gz

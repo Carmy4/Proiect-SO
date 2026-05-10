@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <signal.h>
 
 typedef struct report {
     int ID;
@@ -216,7 +217,46 @@ int match_condition(report *r, const char *field, const char *op, const char *va
     // evitam excluderea raportului in caz de parametru invalid
     return 1;
 }
-
+// notificam monitorul prin SIGUSR1 cand se adauga un raport nou
+// citim PID-ul din .monitor_pid si trimitem semnalul
+void notify_monitor(const char *district, int report_id) {
+    int fd = open(".monitor_pid", O_RDONLY);
+    if (fd == -1) {
+        // monitorul nu ruleaza - scriem in log
+        log_action(district, "notify_monitor_failed: .monitor_pid not found");
+        printf("avertisment: monitorul nu ruleaza (fisierul .monitor_pid nu exista).\n");
+        return;
+    }
+ 
+    char buf[32];
+    memset(buf, 0, sizeof(buf));
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+ 
+    if (n <= 0) {
+        log_action(district, "notify_monitor_failed: could not read PID");
+        printf("avertisment: nu s-a putut citi PID-ul monitorului.\n");
+        return;
+    }
+ 
+    pid_t monitor_pid = (pid_t)atoi(buf);
+    if (monitor_pid <= 0) {
+        log_action(district, "notify_monitor_failed: invalid PID");
+        printf("avertisment: PID invalid in .monitor_pid.\n");
+        return;
+    }
+ 
+    // trimitem SIGUSR1 catre procesul monitor
+    if (kill(monitor_pid, SIGUSR1) == -1) {
+        log_action(district, "notify_monitor_failed: kill() error");
+        printf("avertisment: nu s-a putut notifica monitorul (PID %d).\n", monitor_pid);
+    } else {
+        char log_msg[128];
+        snprintf(log_msg, sizeof(log_msg), "notify_monitor_ok: SIGUSR1 sent to PID %d for report #%d", monitor_pid, report_id);
+        log_action(district, log_msg);
+        printf("monitorul (PID %d) a fost notificat despre raportul #%d.\n", monitor_pid, report_id);
+    }
+}
 // inseram structura cu date in fisierul binar
 void cmd_add(const char *district) {
     setup_district(district);
@@ -262,6 +302,7 @@ void cmd_add(const char *district) {
 
     log_action(district, "add");
     printf("inregistrare completa cu id-ul #%d.\n", r.ID);
+    notify_monitor(district, r.ID);
 }
 
 // citim si parcurgem secvential toate rapoartele adaugate

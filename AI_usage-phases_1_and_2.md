@@ -56,9 +56,35 @@ directa intre un string si un int nu functioneaza in C.
 
 ---
 
-#Evaluare critica
+# Evaluare critica
 
 Ambele functii au fost corecte din prima. Contributia mea principala
 a fost verificarea si intelegerea lor linie cu linie, nu modificarea.
 Logica de filtrare cu AND implicit din cmd_filter am scris-o eu
 separat, conform cerintei din specificatie.
+
+---
+
+# AI Usage Documentation – Phase 2
+
+# Tool folosit
+Claude (claude.ai)
+
+# Pentru ce am folosit AI-ul in Phase 2
+
+In Phase 2 nu am generat cod cu ajutorul AI-ului. L-am folosit
+doar pentru a intelege mai bine anumite concepte si functii de
+sistem pe care le-am implementat apoi singur.
+
+Concepte despre care am cerut explicatii:
+- Cum functioneaza sigaction() si diferenta fata de signal()
+- Ce face pause() si de ce este potrivit pentru asteptarea semnalelor
+- Cum functioneaza kill() pentru trimiterea semnalelor intre procese
+- De ce se foloseste write() in handlere in loc de printf()
+
+# Ce am invatat
+
+- Ca signal() este considerat nesigur si neportabil, iar sigaction() ofera control explicit asupra comportamentului la primirea unui semnal prin flag-uri precum SA_RESTART
+- Ca printf() nu este async-signal-safe si poate provoca deadlockdaca este apelat dintr-un handler; solutia corecta este write() direct pe STDOUT_FILENO
+- Ca pause() suspenda procesul fara a consuma CPU pana la primirea unui semnal, fiind solutia potrivita pentru o bucla de asteptare
+- Ca kill() nu termina neaparat un proces, ci trimite orice semnal specificat catre procesul cu PID-ul dat
