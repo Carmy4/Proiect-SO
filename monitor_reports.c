@@ -8,6 +8,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#define PID_FILE ".monitor_pid"
 
 // flag volatile pentru a semnala buclei principale ca trebuie sa iasa
 // sig_atomic_t garanteaza acces atomic din handler
@@ -58,7 +59,19 @@ void handle_signals(int sig) {
 
 int main() {
     // scriem PID-ul in .monitor_pid la pornire
+    int pid_check=open(PID_FILE, O_RDONLY);
+    if(pid_check!=-1){
+        char pid_aux[32];
+        read(pid_check,pid_aux,sizeof(pid_aux));
+        close(pid_check);
+        printf("Eroare: monitor is already running with PID %s\n",pid_aux);
+        fflush(stdout);
+        exit(1);
+    }
+    
     creare_monitor_pid(".");
+   
+
 
     // configuram handler-ul pentru SIGUSR1
     struct sigaction action_usr1;
